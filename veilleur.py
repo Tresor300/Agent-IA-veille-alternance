@@ -1,3 +1,5 @@
+import re
+import pandas as pd
 import sqlite3
 from datetime import datetime
 from playwright.sync_api import sync_playwright
@@ -6,15 +8,22 @@ URL = "https://vousfaciliter-it.fr/offres-emploi"
 ENTREPRISE = "VFLIT"
 BASE = "data/veilleur.db"
 
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+# Une offre se reconnaît à son adresse : job, offre, emploi... ou un numéro d'identifiant
+MOTIF = re.compile(r"job|offre|offer|emploi|poste|position|vacanc|annonce|requisition|\d{4,}", re.I)
+
 def extraire_offres(page):
-    """Renvoie {adresse de l'offre: titre} pour les liens situés sous la page carrière."""
-    base = page.url.rstrip("/") + "/"
+    """Renvoie {adresse: titre} pour les liens dont l'adresse ressemble à une offre."""
+    page_url = page.url.split("#")[0].rstrip("/")
     liens = page.eval_on_selector_all(
         "a", "els => els.map(e => [e.innerText.trim(), e.href])")
     offres = {}
     for texte, href in liens:
         href = href.split("#")[0]
-        if href.startswith(base) and len(href) > len(base):
+        if not href.startswith("http") or href.rstrip("/") == page_url:
+            continue
+        if MOTIF.search(href):
             texte = " ".join(texte.split())
             if len(texte) > len(offres.get(href, "")):
                 offres[href] = texte
@@ -37,19 +46,19 @@ def garder_nouvelles(offres, entreprise):
     connexion.close()
     return nouvelles
 
-# Sites à surveiller : (entreprise, page carrière)
-SITES = [
-    ("VFLIT", "https://vousfaciliter-it.fr/offres-emploi"),
-    ("Site cassé (test)", "https://site-qui-nexiste-pas-12345.fr/carrieres"),
-]
+# Sites à surveiller : pages validées (✅ Fiable et 🔧 Corrigée)
+df = pd.read_excel("data/pages_a_surveiller.xlsx")
+df = df[df["Verdict"].isin(["✅ Fiable", "🔧 Corrigée"])]
+SITES = [(ligne["Entreprise"], ligne["Page à surveiller"]) for _, ligne in df.iterrows()]
 
 def visiter(navigateur, url, essais=2):
     """Renvoie (offres, erreur). Ne plante jamais : en cas d'échec, offres est vide."""
     erreur = None
     for essai in range(essais):
-        page = navigateur.new_page()
+        page = navigateur.new_page(user_agent=UA)
         try:
-            reponse = page.goto(url, wait_until="networkidle", timeout=30000)
+            reponse = page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(5000)   # 5 s pour laisser la liste s'afficher
             if reponse and reponse.status >= 400:
                 raise Exception(f"code HTTP {reponse.status}")
             titre = page.title().lower()
@@ -62,15 +71,24 @@ def visiter(navigateur, url, essais=2):
             page.close()
     return {}, erreur
 
+bilan = {"avec offres": 0, "0 offre": [], "erreur": []}
 with sync_playwright() as p:
     navigateur = p.chromium.launch()
-    for entreprise, url in SITES:
+    for i, (entreprise, url) in enumerate(SITES, 1):
         offres, erreur = visiter(navigateur, url)
         if erreur:
-            print(f"⚠️  {entreprise} : erreur ({erreur}) — site ignoré pour ce passage")
+            print(f"[{i}/{len(SITES)}] ⚠️  {entreprise} : {erreur}")
+            bilan["erreur"].append(entreprise)
             continue
         nouvelles = garder_nouvelles(offres, entreprise)
-        print(f"{entreprise} : {len(offres)} offres en ligne, dont {len(nouvelles)} nouvelles")
-        for url_offre, titre in nouvelles.items():
-            print(f" 🆕 {titre}\n    {url_offre}")
+        print(f"[{i}/{len(SITES)}] {entreprise} : {len(offres)} offres, dont {len(nouvelles)} nouvelles")
+        if offres:
+            bilan["avec offres"] += 1
+        else:
+            bilan["0 offre"].append(entreprise)
     navigateur.close()
+
+print(f"\nBILAN : {bilan['avec offres']} sites avec des offres, "
+      f"{len(bilan['0 offre'])} sites à 0 offre, {len(bilan['erreur'])} erreurs")
+print("0 offre :", ", ".join(bilan["0 offre"]))
+print("Erreurs :", ", ".join(bilan["erreur"]))
