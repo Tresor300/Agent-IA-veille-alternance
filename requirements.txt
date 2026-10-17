@@ -10,6 +10,7 @@ pandas==3.0.6
 playwright==1.64.0
 pyee==14.0.0
 python-dateutil==2.9.0.post0
+python-dotenv==1.2.4
 requests==2.34.2
 six==1.17.0
 soupsieve==3.0.3

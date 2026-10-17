@@ -2,6 +2,7 @@ import re
 import pandas as pd
 import sqlite3
 from datetime import datetime
+from alerte import envoyer
 from playwright.sync_api import sync_playwright
 
 URL = "https://vousfaciliter-it.fr/offres-emploi"
@@ -30,22 +31,21 @@ def extraire_offres(page):
     return offres
 
 def garder_nouvelles(offres, entreprise):
-    """Enregistre les offres jamais vues et renvoie uniquement celles-là."""
+    """Enregistre les offres jamais vues. Renvoie (nouvelles, première_visite)."""
     connexion = sqlite3.connect(BASE)
     connexion.execute("""CREATE TABLE IF NOT EXISTS offres (
         url TEXT PRIMARY KEY, entreprise TEXT, titre TEXT, vue_le TEXT)""")
+    deja = connexion.execute(
+        "SELECT COUNT(*) FROM offres WHERE entreprise = ?", (entreprise,)).fetchone()[0]
     nouvelles = {}
     for url, titre in offres.items():
-        deja_vue = connexion.execute(
-            "SELECT 1 FROM offres WHERE url = ?", (url,)).fetchone()
-        if not deja_vue:
+        if not connexion.execute("SELECT 1 FROM offres WHERE url = ?", (url,)).fetchone():
             connexion.execute("INSERT INTO offres VALUES (?, ?, ?, ?)",
                 (url, entreprise, titre, datetime.now().isoformat(timespec="seconds")))
             nouvelles[url] = titre
     connexion.commit()
     connexion.close()
-    return nouvelles
-
+    return nouvelles, deja == 0
 # Sites à surveiller : pages validées (✅ Fiable et 🔧 Corrigée)
 df = pd.read_excel("data/pages_a_surveiller.xlsx")
 df = df[df["Verdict"].isin(["✅ Fiable", "🔧 Corrigée"])]
@@ -71,6 +71,9 @@ def visiter(navigateur, url, essais=2):
             page.close()
     return {}, erreur
 
+# Filtre provisoire (avant le filtre IA) : seulement les offres en alternance
+ALTERNANCE = re.compile(r"alternan|apprenti|apprentissage|contrat pro", re.I)
+
 bilan = {"avec offres": 0, "0 offre": [], "erreur": []}
 with sync_playwright() as p:
     navigateur = p.chromium.launch()
@@ -80,8 +83,21 @@ with sync_playwright() as p:
             print(f"[{i}/{len(SITES)}] ⚠️  {entreprise} : {erreur}")
             bilan["erreur"].append(entreprise)
             continue
-        nouvelles = garder_nouvelles(offres, entreprise)
+        nouvelles, premiere_visite = garder_nouvelles(offres, entreprise)
         print(f"[{i}/{len(SITES)}] {entreprise} : {len(offres)} offres, dont {len(nouvelles)} nouvelles")
+        if premiere_visite:
+            print("    (première visite : offres mémorisées, pas d'alerte)")
+        for url_offre, titre in nouvelles.items():
+            passe_filtre = bool(ALTERNANCE.search(titre + " " + url_offre))
+            if not passe_filtre:
+                etat = "pas d'alerte (filtre)"
+            elif premiere_visite:
+                etat = "pas d'alerte (1re visite)"
+            elif envoyer(f"🆕 {entreprise}\n{titre}\n{url_offre}"):
+                etat = "alerte envoyée ✅"
+            else:
+                etat = "ÉCHEC d'envoi ❌"
+            print(f"    🆕 {titre[:60]} → {etat}")
         if offres:
             bilan["avec offres"] += 1
         else:
