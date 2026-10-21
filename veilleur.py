@@ -3,17 +3,28 @@ import pandas as pd
 import sqlite3
 from datetime import datetime
 from alerte import envoyer
+from filtre_ia import juger, juger_offres, GeminiIndisponible, TAILLE_PAQUET, TAILLE_PAQUET_OFFRES
 from playwright.sync_api import sync_playwright
 
-URL = "https://vousfaciliter-it.fr/offres-emploi"
-ENTREPRISE = "VFLIT"
 BASE = "data/veilleur.db"
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 # Une offre se reconnaît à son adresse : job, offre, emploi... ou un numéro d'identifiant
 MOTIF = re.compile(r"job|offre|offer|emploi|poste|position|vacanc|annonce|requisition|\d{4,}", re.I)
+# Mots d'alternance, et contrats incompatibles annoncés dans le titre (règle fixe, sans IA)
+ALTERNANCE = re.compile(r"altern|apprenti|apprentissage|contrat pro|work[- ]?study|apprenticeship", re.I)
+AUTRE_CONTRAT = re.compile(r"\b(stage|stagiaire|intern|internship|cdi|cdd|graduate program)\b", re.I)
+# Lien vers la rubrique « Alternance » d'un site (ex. « Alternance (4) », « Nos stages et alternances »)
+RUBRIQUE = re.compile(r"(nos\s+)?(offres?\s+(en|d'|de)\s*)?(stages?\s+(et|&)\s+)?(alternances?|apprentissage)\b", re.I)
+METIER = re.compile(r"[hfm]/[hfmwx]|\s[-–]\s|ingénieu|développ|technicien|chargé|assistant|analyste|engineer|developer", re.I)
 
+
+def est_rubrique(texte):
+    return len(texte) <= 80 and RUBRIQUE.match(texte) and not METIER.search(texte)
+
+
+# ---------- 1. Collecte des liens d'offres (inchangée) ----------
 def extraire_offres(page):
     """Renvoie {adresse: titre} pour les liens dont l'adresse ressemble à une offre."""
     page_url = page.url.split("#")[0].rstrip("/")
@@ -30,26 +41,45 @@ def extraire_offres(page):
                 offres[href] = texte
     return offres
 
-def garder_nouvelles(offres, entreprise):
-    """Enregistre les offres jamais vues. Renvoie (nouvelles, première_visite)."""
+
+def ouvrir_base():
     connexion = sqlite3.connect(BASE)
     connexion.execute("""CREATE TABLE IF NOT EXISTS offres (
         url TEXT PRIMARY KEY, entreprise TEXT, titre TEXT, vue_le TEXT)""")
+    colonnes = {c[1] for c in connexion.execute("PRAGMA table_info(offres)")}
+    for col in ("verdict", "raison", "description", "verdict2", "raison2"):
+        if col not in colonnes:
+            connexion.execute(f"ALTER TABLE offres ADD COLUMN {col} TEXT")
+    if "envoyee" not in colonnes:
+        # DEFAULT 1 : les offres déjà en base avant le filtre IA sont considérées comme traitées
+        connexion.execute("ALTER TABLE offres ADD COLUMN envoyee INTEGER DEFAULT 1")
+    connexion.commit()
+    return connexion
+
+
+def garder_nouvelles(connexion, offres, entreprise):
+    """Enregistre les offres jamais vues. Renvoie (nouvelles, première_visite).
+    À la première visite d'une entreprise, les offres sont mémorisées sans être jugées ni envoyées."""
     deja = connexion.execute(
         "SELECT COUNT(*) FROM offres WHERE entreprise = ?", (entreprise,)).fetchone()[0]
+    premiere_visite = deja == 0
     nouvelles = {}
     for url, titre in offres.items():
         if not connexion.execute("SELECT 1 FROM offres WHERE url = ?", (url,)).fetchone():
-            connexion.execute("INSERT INTO offres VALUES (?, ?, ?, ?)",
-                (url, entreprise, titre, datetime.now().isoformat(timespec="seconds")))
+            connexion.execute(
+                "INSERT INTO offres (url, entreprise, titre, vue_le, envoyee) VALUES (?, ?, ?, ?, ?)",
+                (url, entreprise, titre, datetime.now().isoformat(timespec="seconds"),
+                 1 if premiere_visite else 0))
             nouvelles[url] = titre
     connexion.commit()
-    connexion.close()
-    return nouvelles, deja == 0
+    return nouvelles, premiere_visite
+
+
 # Sites à surveiller : pages validées (✅ Fiable et 🔧 Corrigée)
 df = pd.read_excel("data/pages_a_surveiller.xlsx")
 df = df[df["Verdict"].isin(["✅ Fiable", "🔧 Corrigée"])]
 SITES = [(ligne["Entreprise"], ligne["Page à surveiller"]) for _, ligne in df.iterrows()]
+
 
 def visiter(navigateur, url, essais=2):
     """Renvoie (offres, erreur). Ne plante jamais : en cas d'échec, offres est vide."""
@@ -64,47 +94,165 @@ def visiter(navigateur, url, essais=2):
             titre = page.title().lower()
             if "introuvable" in titre or "not found" in titre:
                 raise Exception("page introuvable")
-            return extraire_offres(page), None
+            offres = extraire_offres(page)
+            # Suivre la rubrique « Alternance » du site : ses offres n'apparaissent pas sur la page principale
+            for rubrique in [u for u, t in offres.items() if est_rubrique(t)][:3]:
+                try:
+                    page.goto(rubrique, wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(5000)
+                    for u, t in extraire_offres(page).items():
+                        if len(t) > len(offres.get(u, "")):
+                            offres[u] = t
+                except Exception:
+                    pass
+            return offres, None
         except Exception as e:
             erreur = str(e).splitlines()[0]   # 1re ligne du message suffit
         finally:
             page.close()
     return {}, erreur
 
-# Filtre provisoire (avant le filtre IA) : seulement les offres en alternance
-ALTERNANCE = re.compile(r"alternan|apprenti|apprentissage|contrat pro", re.I)
 
+# ---------- 2. Lecture d'une offre (pour l'étape 2) ----------
+def lire_offre(navigateur, url):
+    """Texte de la page d'une offre (zone principale si elle existe), 3000 caractères au plus.
+    Renvoie "" si la page ne s'ouvre pas : l'IA jugera alors sur le titre."""
+    page = navigateur.new_page(user_agent=UA)
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(3000)
+        for zone in ("main", "article", "[role=main]", "body"):
+            element = page.query_selector(zone)
+            if element:
+                texte = " ".join(element.inner_text().split())
+                if len(texte) > 200 or zone == "body":
+                    return texte[:3000]
+        return ""
+    except Exception:
+        return ""
+    finally:
+        page.close()
+
+
+# ---------- 3. Message groupé ----------
+def bloc(ligne):
+    _, titre, entreprise, raison = ligne
+    return f"{titre}\n🏢 {entreprise}\n💡 {raison or '?'}\n{ligne[0]}\n"
+
+
+def decouper(entete, blocs, limite=3800):
+    messages, courant = [], entete
+    for b in blocs:
+        if len(courant) + len(b) + 1 > limite:
+            messages.append(courant)
+            courant = ""
+        courant += "\n" + b
+    messages.append(courant)
+    return messages
+
+
+# ---------- 4. Programme principal ----------
+connexion = ouvrir_base()
 bilan = {"avec offres": 0, "0 offre": [], "erreur": []}
 with sync_playwright() as p:
     navigateur = p.chromium.launch()
+
+    # 4.1 Collecte : visite des pages carrière
     for i, (entreprise, url) in enumerate(SITES, 1):
         offres, erreur = visiter(navigateur, url)
         if erreur:
             print(f"[{i}/{len(SITES)}] ⚠️  {entreprise} : {erreur}")
             bilan["erreur"].append(entreprise)
             continue
-        nouvelles, premiere_visite = garder_nouvelles(offres, entreprise)
+        nouvelles, premiere_visite = garder_nouvelles(connexion, offres, entreprise)
         print(f"[{i}/{len(SITES)}] {entreprise} : {len(offres)} offres, dont {len(nouvelles)} nouvelles")
         if premiere_visite:
             print("    (première visite : offres mémorisées, pas d'alerte)")
-        for url_offre, titre in nouvelles.items():
-            passe_filtre = bool(ALTERNANCE.search(titre + " " + url_offre))
-            if not passe_filtre:
-                etat = "pas d'alerte (filtre)"
-            elif premiere_visite:
-                etat = "pas d'alerte (1re visite)"
-            elif envoyer(f"🆕 {entreprise}\n{titre}\n{url_offre}"):
-                etat = "alerte envoyée ✅"
-            else:
-                etat = "ÉCHEC d'envoi ❌"
-            print(f"    🆕 {titre[:60]} → {etat}")
         if offres:
             bilan["avec offres"] += 1
         else:
             bilan["0 offre"].append(entreprise)
+
+    # 4.2 Étape 1 : jugement du titre des nouvelles offres
+    a_juger = connexion.execute(
+        "SELECT url, titre FROM offres WHERE envoyee = 0 AND verdict IS NULL").fetchall()
+    print(f"\nÉtape 1 : {len(a_juger)} titres à juger…")
+    vides = [(u,) for u, t in a_juger if len((t or "").strip()) < 3]          # liens sans texte
+    connexion.executemany("UPDATE offres SET verdict = 'non', raison = 'lien sans texte' WHERE url = ?", vides)
+    contrat = [(u,) for u, t in a_juger if AUTRE_CONTRAT.search(t or "") and not ALTERNANCE.search(t or "")]
+    connexion.executemany("UPDATE offres SET verdict = 'non', raison = 'stage, CDI ou CDD annoncé dans le titre' "
+                          "WHERE url = ?", contrat)
+    rubriques = [(u,) for u, t in a_juger if est_rubrique(t or "")]
+    connexion.executemany("UPDATE offres SET verdict = 'non', raison = 'rubrique (ses offres sont suivies)' "
+                          "WHERE url = ?", rubriques)
+    exclues = {u for (u,) in vides + contrat + rubriques}
+    a_juger = [(u, t) for u, t in a_juger if u not in exclues]
+    try:
+        for d in range(0, len(a_juger), TAILLE_PAQUET):
+            paquet = a_juger[d:d + TAILLE_PAQUET]
+            verdicts = juger([t for _, t in paquet], source="carriere")
+            connexion.executemany("UPDATE offres SET verdict = ?, raison = ? WHERE url = ?",
+                                  [(v, r, u) for (u, _), (v, r) in zip(paquet, verdicts)])
+            connexion.commit()
+    except GeminiIndisponible as e:
+        print(f"⚠️ {e} — le reste sera jugé au prochain passage.")
+    connexion.commit()
+
+    # 4.3 Étape 2 : lecture de la page de l'offre pour les « oui » et « doute »
+    a_lire = connexion.execute(
+        "SELECT url, titre, entreprise, description FROM offres "
+        "WHERE envoyee = 0 AND verdict IN ('oui', 'doute') AND verdict2 IS NULL").fetchall()
+    print(f"Étape 2 : {len(a_lire)} offres à lire…")
+    try:
+        for d in range(0, len(a_lire), TAILLE_PAQUET_OFFRES):
+            paquet = []
+            for u, t, e, desc in a_lire[d:d + TAILLE_PAQUET_OFFRES]:
+                if desc is None:                     # page jamais lue : on la lit et on la garde
+                    desc = lire_offre(navigateur, u)
+                    connexion.execute("UPDATE offres SET description = ? WHERE url = ?", (desc, u))
+                paquet.append((u, t, e, desc))
+            connexion.commit()
+            verdicts = juger_offres([(t, e, desc) for _, t, e, desc in paquet], source="carriere")
+            connexion.executemany("UPDATE offres SET verdict2 = ?, raison2 = ? WHERE url = ?",
+                                  [(v, r, u) for (u, *_), (v, r) in zip(paquet, verdicts) if v])
+            connexion.commit()
+    except GeminiIndisponible as e:
+        print(f"⚠️ {e} — le reste sera lu au prochain passage.")
     navigateur.close()
+
+# 4.4 Envoi groupé : les « oui », puis une section « à vérifier »
+lignes = connexion.execute(
+    "SELECT url, titre, entreprise, raison2, verdict2 FROM offres "
+    "WHERE envoyee = 0 AND verdict2 IN ('oui', 'à vérifier') ORDER BY entreprise").fetchall()
+vues, oui, a_verifier = set(), [], []
+for u, t, e, r, v in lignes:
+    cle = (" ".join((t or "").lower().split()), (e or "").lower())   # doublon dans ce message
+    if cle in vues:
+        continue
+    vues.add(cle)
+    (oui if v == "oui" else a_verifier).append((u, t, e, r))
+if lignes:
+    blocs = [bloc(l) for l in oui]
+    if a_verifier:
+        blocs.append(f"🔎 À VÉRIFIER ({len(a_verifier)}) — contrat non précisé ou poste mixte\n")
+        blocs += [bloc(l) for l in a_verifier]
+    entete = f"🌐 Veilleur — {len(oui)} alternance(s) informatique(s) sur les sites carrière\n"
+    if all(envoyer(m) for m in decouper(entete, blocs)):
+        connexion.executemany("UPDATE offres SET envoyee = 1 WHERE url = ?", [(l[0],) for l in lignes])
+        connexion.commit()
+    else:
+        print("❌ Échec d'envoi Telegram : ces offres seront renvoyées au prochain passage.")
+
+etape1 = dict(connexion.execute(
+    "SELECT verdict, COUNT(*) FROM offres WHERE verdict IS NOT NULL GROUP BY 1").fetchall())
+etape2 = dict(connexion.execute(
+    "SELECT verdict2, COUNT(*) FROM offres WHERE verdict2 IS NOT NULL GROUP BY 1").fetchall())
+connexion.close()
 
 print(f"\nBILAN : {bilan['avec offres']} sites avec des offres, "
       f"{len(bilan['0 offre'])} sites à 0 offre, {len(bilan['erreur'])} erreurs")
 print("0 offre :", ", ".join(bilan["0 offre"]))
 print("Erreurs :", ", ".join(bilan["erreur"]))
+print(f"Étape 1 (titre) : {etape1}")
+print(f"Étape 2 (offre) : {etape2}")
+print(f"Envoyées : {len(oui)} oui + {len(a_verifier)} à vérifier")
