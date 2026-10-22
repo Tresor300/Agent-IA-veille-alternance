@@ -121,13 +121,18 @@ def lire_offre(navigateur, url):
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(3000)
+        texte = ""
         for zone in ("main", "article", "[role=main]", "body"):
             element = page.query_selector(zone)
             if element:
                 texte = " ".join(element.inner_text().split())
-                if len(texte) > 200 or zone == "body":
-                    return texte[:3000]
-        return ""
+                if len(texte) > 200:
+                    break
+        texte = texte[:3000]
+        # Mention d'alternance ailleurs dans la page (encadré, bas de page) : on la signale
+        if not ALTERNANCE.search(texte) and ALTERNANCE.search(page.inner_text("body")):
+            texte = texte[:2900] + " … [la page mentionne aussi l'alternance]"
+        return texte
     except Exception:
         return ""
     finally:
@@ -213,6 +218,11 @@ with sync_playwright() as p:
                 paquet.append((u, t, e, desc))
             connexion.commit()
             verdicts = juger_offres([(t, e, desc) for _, t, e, desc in paquet], source="carriere")
+            # Règle fixe : une offre lisible qui ne parle jamais d'alternance n'en est pas une
+            verdicts = [("non", "aucune mention d'alternance dans l'offre")
+                        if v in ("oui", "à vérifier") and len(desc or "") > 800
+                        and not ALTERNANCE.search((t or "") + " " + desc) else (v, r)
+                        for (_, t, _, desc), (v, r) in zip(paquet, verdicts)]
             connexion.executemany("UPDATE offres SET verdict2 = ?, raison2 = ? WHERE url = ?",
                                   [(v, r, u) for (u, *_), (v, r) in zip(paquet, verdicts) if v])
             connexion.commit()
@@ -236,7 +246,8 @@ if lignes:
     if a_verifier:
         blocs.append(f"🔎 À VÉRIFIER ({len(a_verifier)}) — contrat non précisé ou poste mixte\n")
         blocs += [bloc(l) for l in a_verifier]
-    entete = f"🌐 Veilleur — {len(oui)} alternance(s) informatique(s) sur les sites carrière\n"
+    entete = (f"🌐 Veilleur — {len(oui)} alternance(s) informatique(s) sur les sites carrière\n" if oui
+              else f"🌐 Veilleur — aucune offre sûre, {len(a_verifier)} offre(s) à vérifier\n")
     if all(envoyer(m) for m in decouper(entete, blocs)):
         connexion.executemany("UPDATE offres SET envoyee = 1 WHERE url = ?", [(l[0],) for l in lignes])
         connexion.commit()

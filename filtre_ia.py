@@ -137,7 +137,7 @@ CONTRAT = {
         "description est vide, illisible (menu, cookies) ou trop courte pour le savoir ; "
         "2) le métier respecte la frontière ci-dessus. \"oui\" seulement si les deux critères sont remplis. "
         "Si la page n'est pas UNE offre précise (liste d'offres, rubrique, présentation d'équipe ou de produit, "
-        "formulaire de candidature spontanée) = \"non\".\n"
+        "formulaire de candidature spontanée) = \"non\". Un poste situé hors de France = \"non\".\n"
     ),
 }
 FIN_OFFRES = (
