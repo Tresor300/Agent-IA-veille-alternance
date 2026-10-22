@@ -161,15 +161,24 @@ def lancer():
         deja_envoyees = set()
     maintenant = datetime.now().isoformat(timespec="seconds")
     nouvelles = [(k, j) for k, j in toutes.items() if k not in connues]
+    # Sécurité : base vide (mémoire perdue) → on mémorise tout sans juger ni envoyer
+    premier_passage = not connues
+    if premier_passage:
+        print("⚠️ Base vide : offres mémorisées sans jugement ni envoi (pas d'avalanche d'alertes).")
     con.executemany(
-        "INSERT INTO offres_capteur (id, titre, entreprise, lieu, url, km, envoyee, vue_le, description) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO offres_capteur (id, titre, entreprise, lieu, url, km, verdict, envoyee, vue_le, description) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
         [(k, html.unescape(lire(j, "offer.title") or ""), lire(j, "workplace.name"),
           lire(j, "workplace.location.address"), lire(j, "apply.url"), distance_nantes(j),
-          1 if k in deja_envoyees else 0, maintenant, description(j)) for k, j in nouvelles])
-    # Offres déjà connues mais sans description (enregistrées avant l'étape 2) : on la complète
-    con.executemany("UPDATE offres_capteur SET description = ? WHERE id = ? AND description IS NULL",
-                    [(description(j), k) for k, j in toutes.items() if k in connues])
+          "initial" if premier_passage else None,
+          1 if (premier_passage or k in deja_envoyees) else 0, maintenant,
+          None if premier_passage else description(j)) for k, j in nouvelles])
+    # Description manquante d'une offre qui attend encore l'étape 2 : on la complète
+    attente = {r[0] for r in con.execute(
+        "SELECT id FROM offres_capteur WHERE description IS NULL AND verdict IN ('oui', 'doute') "
+        "AND verdict2 IS NULL AND envoyee = 0")}
+    con.executemany("UPDATE offres_capteur SET description = ? WHERE id = ?",
+                    [(description(toutes[k]), k) for k in attente if k in toutes])
     con.commit()
 
     # 3.3 Étape 1 : jugement du titre, sauvegardé paquet par paquet
@@ -231,6 +240,12 @@ def lancer():
             con.commit()
         else:
             print("❌ Échec d'envoi Telegram : ces offres seront renvoyées au prochain passage.")
+
+    # Ménage : la description ne sert qu'aux offres qui attendent l'étape 2 (base légère pour GitHub)
+    con.execute("UPDATE offres_capteur SET description = NULL "
+                "WHERE verdict = 'non' OR (verdict2 IS NULL AND envoyee = 1)")
+    con.commit()
+    con.execute("VACUUM")
 
     comptes = dict(con.execute("SELECT COALESCE(verdict, 'en attente'), COUNT(*) FROM offres_capteur GROUP BY 1").fetchall())
     comptes2 = dict(con.execute("SELECT verdict2, COUNT(*) FROM offres_capteur WHERE verdict2 IS NOT NULL GROUP BY 1").fetchall())
