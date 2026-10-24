@@ -130,9 +130,14 @@ def lire_offre(navigateur, url):
                 if len(texte) > 200:
                     break
         texte = texte[:3000]
-        # Mention d'alternance ailleurs dans la page (encadré, bas de page) : on la signale
-        if not ALTERNANCE.search(texte) and ALTERNANCE.search(page.inner_text("body")):
-            texte = texte[:2900] + " … [la page mentionne aussi l'alternance]"
+        # Mention d'alternance ailleurs dans la page (encadré, bas de page) : on transmet la phrase
+        # elle-même, pour que l'IA distingue « Type de contrat : apprentissage » d'un slogan du site
+        if not ALTERNANCE.search(texte):
+            corps = " ".join(page.inner_text("body").split())
+            trouve = ALTERNANCE.search(corps)
+            if trouve:
+                extrait = corps[max(0, trouve.start() - 120):trouve.end() + 120]
+                texte = texte[:2700] + f" … [ailleurs sur la page : « {extrait} »]"
         return texte
     except Exception:
         return ""

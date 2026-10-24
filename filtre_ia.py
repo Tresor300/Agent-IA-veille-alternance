@@ -137,12 +137,15 @@ CONTRAT = {
         "description est vide, illisible (menu, cookies) ou trop courte pour le savoir ; "
         "2) le métier respecte la frontière ci-dessus. \"oui\" seulement si les deux critères sont remplis. "
         "Si la page n'est pas UNE offre précise (liste d'offres, rubrique, présentation d'équipe ou de produit, "
-        "formulaire de candidature spontanée) = \"non\". Un poste situé hors de France = \"non\".\n"
+        "formulaire de candidature spontanée) = \"non\". Un poste situé hors de France = \"non\". Une phrase générale du site, sans lien avec "
+        "ce poste (« nous recrutons aussi des alternants », menu « Alternance et stages ») ne prouve PAS que "
+        "cette offre est une alternance.\n"
     ),
 }
 FIN_OFFRES = (
     "Si la description est vide ou trop courte, juge sur le titre avec la même frontière : \"non\" si le titre "
-    "correspond à un métier NON (ex. contrôleur de gestion, chef de projet, maîtrise d'ouvrage), sinon \"à vérifier\". "
+    "correspond à un métier NON (ex. contrôleur de gestion, chef de projet, maîtrise d'ouvrage, technicien de "
+    "maintenance sans mention de l'informatique), sinon \"à vérifier\". "
     "\"à vérifier\" aussi si, après lecture, tu hésites vraiment entre oui et non.\n"
     "Pour \"oui\", la raison cite la mission et l'outil trouvés dans l'offre (ex. « automatiser les "
     "déploiements avec Docker et GitLab CI »). Raison courte, une phrase.\n"
