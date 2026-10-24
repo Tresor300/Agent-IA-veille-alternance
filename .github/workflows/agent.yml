@@ -12,6 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
+      TZ: Europe/Paris                # heures du journal et des offres en heure française
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       LBA_API_KEY: ${{ secrets.LBA_API_KEY }}

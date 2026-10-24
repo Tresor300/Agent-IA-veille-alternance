@@ -4,14 +4,21 @@ from collections import Counter
 import pandas as pd
 import requests
 from dotenv import load_dotenv
-from alerte import envoyer
+from config import envoyer, noter_passage, DATA, RAPIDE
 from dedoublon import Registre, offres_deja_envoyees
 from filtre_ia import juger, juger_offres, GeminiIndisponible, TAILLE_PAQUET, TAILLE_PAQUET_OFFRES
 
 load_dotenv()
+
+# Mode test (MODE_TEST=1) : les messages sont affichés à l'écran au lieu d'être envoyés sur Telegram
+if os.environ.get("MODE_TEST"):
+    def envoyer(texte):
+        print("\n----- [MODE TEST] message non envoyé -----\n" + texte)
+        return True
+    print("🧪 MODE TEST : aucun message ne sera envoyé sur Telegram.")
 URL = "https://api.apprentissage.beta.gouv.fr/api/job/v1/search"
 CLES = {"Authorization": f"Bearer {os.environ['LBA_API_KEY']}"}
-BASE = "data/veilleur.db"
+BASE = f"{DATA}/veilleur.db"
 NANTES = (47.218, -1.553)
 ROMES_INFO = ",".join(f"M18{n:02d}" for n in range(100)) + ",I1401"
 DOM = [(16.25, -61.58, 60), (14.64, -61.02, 50), (4.94, -52.33, 150), (-21.11, 55.53, 60), (-12.78, 45.15, 40)]
@@ -102,7 +109,7 @@ def distance_nantes(j):
     return round(6371 * 2 * math.asin(math.sqrt(a)))
 
 
-CIBLES = [str(n).lower().strip() for n in pd.read_excel("data/pages_a_surveiller.xlsx")["Entreprise"].dropna()]
+CIBLES = [str(n).lower().strip() for n in pd.read_excel(f"{DATA}/pages_a_surveiller.xlsx")["Entreprise"].dropna()]
 
 
 def est_cible(entreprise):
@@ -137,11 +144,14 @@ def decouper(entete, blocs, limite=3800):
 
 
 # ---------- 3. Programme principal ----------
+
 def lancer():
     debut = time.time()
 
     # 3.1 Collecte
     cercles = list(grille_metropole()) + DOM
+    if RAPIDE:                                 # test rapide : un seul cercle autour de Nantes
+        cercles = [(NANTES[0], NANTES[1], 30)]
     for i, (lat, lon, rayon) in enumerate(cercles, 1):
         balayer(lat, lon, rayon)
         if i % 100 == 0:
@@ -252,6 +262,7 @@ def lancer():
 
     comptes = dict(con.execute("SELECT COALESCE(verdict, 'en attente'), COUNT(*) FROM offres_capteur GROUP BY 1").fetchall())
     comptes2 = dict(con.execute("SELECT verdict2, COUNT(*) FROM offres_capteur WHERE verdict2 IS NOT NULL GROUP BY 1").fetchall())
+    noter_passage(con, "capteur", debut, len(nouvelles), len(oui) + len(a_verifier), "")
     con.close()
     print(f"\n=== BILAN CAPTEUR ({round((time.time() - debut) / 60, 1)} min) ===")
     print(f"Requêtes : {stats['requetes']} | piles traitées : {stats['piles']}")

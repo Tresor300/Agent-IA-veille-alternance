@@ -1,13 +1,22 @@
+import os
 import re
 import pandas as pd
 import sqlite3
 from datetime import datetime
-from alerte import envoyer
+import time
+from config import envoyer, noter_passage, DATA, RAPIDE
 from dedoublon import Registre, offres_deja_envoyees
 from filtre_ia import juger, juger_offres, GeminiIndisponible, TAILLE_PAQUET, TAILLE_PAQUET_OFFRES
 from playwright.sync_api import sync_playwright
 
-BASE = "data/veilleur.db"
+BASE = f"{DATA}/veilleur.db"
+
+# Mode test (MODE_TEST=1) : les messages sont affichés à l'écran au lieu d'être envoyés sur Telegram
+if os.environ.get("MODE_TEST"):
+    def envoyer(texte):
+        print("\n----- [MODE TEST] message non envoyé -----\n" + texte)
+        return True
+    print("🧪 MODE TEST : aucun message ne sera envoyé sur Telegram.")
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -77,9 +86,11 @@ def garder_nouvelles(connexion, offres, entreprise):
 
 
 # Sites à surveiller : pages validées (✅ Fiable et 🔧 Corrigée)
-df = pd.read_excel("data/pages_a_surveiller.xlsx")
+df = pd.read_excel(f"{DATA}/pages_a_surveiller.xlsx")
 df = df[df["Verdict"].isin(["✅ Fiable", "🔧 Corrigée"])]
 SITES = [(ligne["Entreprise"], ligne["Page à surveiller"]) for _, ligne in df.iterrows()]
+if RAPIDE:                                     # test rapide : 10 sites seulement
+    SITES = SITES[:10]
 
 
 def visiter(navigateur, url, essais=2):
@@ -164,6 +175,8 @@ def decouper(entete, blocs, limite=3800):
 
 # ---------- 4. Programme principal ----------
 connexion = ouvrir_base()
+debut = time.time()
+total_nouvelles = 0
 bilan = {"avec offres": 0, "0 offre": [], "erreur": []}
 with sync_playwright() as p:
     navigateur = p.chromium.launch()
@@ -176,6 +189,7 @@ with sync_playwright() as p:
             bilan["erreur"].append(entreprise)
             continue
         nouvelles, premiere_visite = garder_nouvelles(connexion, offres, entreprise)
+        total_nouvelles += len(nouvelles)
         print(f"[{i}/{len(SITES)}] {entreprise} : {len(offres)} offres, dont {len(nouvelles)} nouvelles")
         if premiere_visite:
             print("    (première visite : offres mémorisées, pas d'alerte)")
@@ -268,6 +282,7 @@ etape1 = dict(connexion.execute(
     "SELECT verdict, COUNT(*) FROM offres WHERE verdict IS NOT NULL GROUP BY 1").fetchall())
 etape2 = dict(connexion.execute(
     "SELECT verdict2, COUNT(*) FROM offres WHERE verdict2 IS NOT NULL GROUP BY 1").fetchall())
+noter_passage(connexion, "veilleur", debut, total_nouvelles, len(oui) + len(a_verifier), ", ".join(bilan["erreur"]))
 connexion.close()
 
 print(f"\nBILAN : {bilan['avec offres']} sites avec des offres, "
