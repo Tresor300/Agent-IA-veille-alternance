@@ -5,6 +5,7 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 from alerte import envoyer
+from dedoublon import Registre, offres_deja_envoyees
 from filtre_ia import juger, juger_offres, GeminiIndisponible, TAILLE_PAQUET, TAILLE_PAQUET_OFFRES
 
 load_dotenv()
@@ -218,13 +219,12 @@ def lancer():
     # 3.5 Envoi : les « oui » de l'étape 2, puis une section « à vérifier »
     lignes = con.execute("SELECT id, titre, entreprise, lieu, url, km, verdict2, raison2 FROM offres_capteur "
                          "WHERE verdict2 IN ('oui', 'à vérifier') AND envoyee = 0").fetchall()
-    # Doublons : même titre + même entreprise qu'une offre déjà envoyée ou déjà dans ce message
-    cle = lambda titre, entreprise: (" ".join((titre or "").lower().split()), (entreprise or "").lower().strip())
-    vues = {cle(t, e) for t, e in con.execute("SELECT titre, entreprise FROM offres_capteur WHERE envoyee = 1")}
+    # Doublons : même offre déjà envoyée (par le capteur ou le veilleur) ou déjà dans ce message
+    registre = Registre(offres_deja_envoyees(con))
     uniques = []
     for l in lignes:
-        if cle(l[1], l[2]) not in vues:
-            vues.add(cle(l[1], l[2]))
+        if not registre.est_doublon(l[1], l[2], l[3]):
+            registre.ajouter(l[1], l[2], l[3])
             uniques.append(l)
     ordre = lambda l: (not est_cible(l[2]), l[5] if l[5] is not None else 99999)
     oui = sorted([l for l in uniques if l[6] == "oui"], key=ordre)
@@ -240,6 +240,9 @@ def lancer():
             con.commit()
         else:
             print("❌ Échec d'envoi Telegram : ces offres seront renvoyées au prochain passage.")
+    elif lignes:                       # uniquement des doublons : rien à envoyer, mais on les marque vus
+        con.executemany("UPDATE offres_capteur SET envoyee = 1 WHERE id = ?", [(l[0],) for l in lignes])
+        con.commit()
 
     # Ménage : la description ne sert qu'aux offres qui attendent l'étape 2 (base légère pour GitHub)
     con.execute("UPDATE offres_capteur SET description = NULL "

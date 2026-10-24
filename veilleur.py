@@ -3,6 +3,7 @@ import pandas as pd
 import sqlite3
 from datetime import datetime
 from alerte import envoyer
+from dedoublon import Registre, offres_deja_envoyees
 from filtre_ia import juger, juger_offres, GeminiIndisponible, TAILLE_PAQUET, TAILLE_PAQUET_OFFRES
 from playwright.sync_api import sync_playwright
 
@@ -234,14 +235,15 @@ with sync_playwright() as p:
 lignes = connexion.execute(
     "SELECT url, titre, entreprise, raison2, verdict2 FROM offres "
     "WHERE envoyee = 0 AND verdict2 IN ('oui', 'à vérifier') ORDER BY entreprise").fetchall()
-vues, oui, a_verifier = set(), [], []
+# Doublons : même offre déjà envoyée (par le veilleur ou le capteur) ou déjà dans ce message
+registre = Registre(offres_deja_envoyees(connexion))
+oui, a_verifier = [], []
 for u, t, e, r, v in lignes:
-    cle = (" ".join((t or "").lower().split()), (e or "").lower())   # doublon dans ce message
-    if cle in vues:
+    if registre.est_doublon(t, e):
         continue
-    vues.add(cle)
+    registre.ajouter(t, e)
     (oui if v == "oui" else a_verifier).append((u, t, e, r))
-if lignes:
+if oui or a_verifier:
     blocs = [bloc(l) for l in oui]
     if a_verifier:
         blocs.append(f"🔎 À VÉRIFIER ({len(a_verifier)}) — contrat non précisé ou poste mixte\n")
@@ -253,6 +255,9 @@ if lignes:
         connexion.commit()
     else:
         print("❌ Échec d'envoi Telegram : ces offres seront renvoyées au prochain passage.")
+elif lignes:                           # uniquement des doublons : rien à envoyer, mais on les marque vus
+    connexion.executemany("UPDATE offres SET envoyee = 1 WHERE url = ?", [(l[0],) for l in lignes])
+    connexion.commit()
 
 etape1 = dict(connexion.execute(
     "SELECT verdict, COUNT(*) FROM offres WHERE verdict IS NOT NULL GROUP BY 1").fetchall())
