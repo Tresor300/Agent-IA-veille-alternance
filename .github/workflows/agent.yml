@@ -40,10 +40,12 @@ jobs:
           python -m playwright install --with-deps chromium
 
       - name: 5. Capteur (La bonne alternance)
+        id: capteur
         continue-on-error: true       # une panne du capteur n'empêche pas le veilleur
         run: python capteur.py
 
       - name: 6. Veilleur (sites carrière)
+        id: veilleur
         continue-on-error: true
         run: python veilleur.py
 
@@ -63,3 +65,13 @@ jobs:
             git commit -m "$JOUR"              # nouveau jour : nouvelle version
             git push
           fi
+
+      - name: 8. Alerte Telegram en cas d'échec
+        if: failure() || steps.capteur.outcome == 'failure' || steps.veilleur.outcome == 'failure'
+        run: |
+          TEXTE="⚠️ Agent de veille : échec pendant le passage
+          Capteur : ${{ steps.capteur.outcome }}
+          Veilleur : ${{ steps.veilleur.outcome }}
+          Détails : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${TEXTE}" > /dev/null
