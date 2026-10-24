@@ -1,9 +1,7 @@
 name: Agent de veille alternance
 
 on:
-  schedule:
-    - cron: "17 */2 * * *"     # toutes les 2 heures, à h+17 (heure UTC)
-  workflow_dispatch:            # bouton « Run workflow » pour lancer à la main
+  workflow_dispatch:            # lancé toutes les 2 h par cron-job.org (h+17, heure de Paris), ou à la main
 
 concurrency:
   group: agent                  # jamais deux passages en même temps
