@@ -210,7 +210,8 @@ with sync_playwright() as p:
             offres, erreur = visiter(navigateur, url)
         else:                                    # interface officielle de la plateforme
             try:
-                lues = lire_interface(acces, identifiant)
+                deja_vues = {u for (u,) in connexion.execute("SELECT url FROM offres WHERE entreprise = ?", (entreprise,))}
+                lues = lire_interface(acces, identifiant, deja_vues)
                 offres = {u: t for u, (t, _) in lues.items()}
                 descriptions = {u: d for u, (_, d) in lues.items()}
                 erreur = None

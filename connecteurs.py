@@ -78,14 +78,19 @@ def _lever(societe):
     return offres
 
 
-def _smartrecruiters(societe):
-    """Seulement les offres trouvées par la recherche du site sur les mots de l'alternance (liste courte)."""
+def _smartrecruiters(societe, deja_vues=frozenset()):
+    """Seulement les offres trouvées par la recherche du site sur les mots de l'alternance.
+    La description (un appel par offre) n'est demandée que pour les offres jamais vues."""
     trouvees = {}
     for mot in RECHERCHES:
         for o in _get(f"https://api.smartrecruiters.com/v1/companies/{societe}/postings", q=mot, limit=100).get("content", []):
             trouvees[o["id"]] = o
     offres = {}
     for ident, o in trouvees.items():
+        adresse = f"https://jobs.smartrecruiters.com/{societe}/{ident}"
+        if adresse in deja_vues:
+            offres[adresse] = (o["name"], "")
+            continue
         try:
             detail = _get(f"https://api.smartrecruiters.com/v1/companies/{societe}/postings/{ident}")
             sections = (detail.get("jobAd") or {}).get("sections") or {}
@@ -94,7 +99,7 @@ def _smartrecruiters(societe):
             description = ""
         lieu = (o.get("location") or {}).get("city", "?")
         contrat = (o.get("typeOfEmployment") or {}).get("label", "?")
-        offres[f"https://jobs.smartrecruiters.com/{societe}/{ident}"] = (
+        offres[adresse] = (
             o["name"], _texte(f"Contrat : {contrat} — Lieu : {lieu} — {description}"))
     return offres
 
@@ -110,9 +115,12 @@ def _recruitee(societe):
 LECTEURS = {"greenhouse": _greenhouse, "lever": _lever, "smartrecruiters": _smartrecruiters, "recruitee": _recruitee}
 
 
-def lire_interface(plateforme, identifiant):
-    """Renvoie {adresse de l'offre: (titre, description)} ; lève AccesImpossible en cas d'échec."""
+def lire_interface(plateforme, identifiant, deja_vues=frozenset()):
+    """Renvoie {adresse de l'offre: (titre, description)} ; lève AccesImpossible en cas d'échec.
+    deja_vues : adresses déjà en base, pour éviter de redemander leur description."""
     try:
+        if plateforme == "smartrecruiters":
+            return _smartrecruiters(identifiant, deja_vues)
         return LECTEURS[plateforme](identifiant)
     except AccesImpossible:
         raise
