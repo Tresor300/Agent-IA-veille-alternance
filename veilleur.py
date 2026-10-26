@@ -1,5 +1,6 @@
 import os
 import re
+from urllib.parse import urlparse
 import pandas as pd
 import sqlite3
 from datetime import datetime
@@ -11,12 +12,6 @@ from playwright.sync_api import sync_playwright
 
 BASE = f"{DATA}/veilleur.db"
 
-# Mode test (MODE_TEST=1) : les messages sont affichés à l'écran au lieu d'être envoyés sur Telegram
-if os.environ.get("MODE_TEST"):
-    def envoyer(texte):
-        print("\n----- [MODE TEST] message non envoyé -----\n" + texte)
-        return True
-    print("🧪 MODE TEST : aucun message ne sera envoyé sur Telegram.")
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -36,8 +31,11 @@ def est_rubrique(texte):
 
 # ---------- 1. Collecte des liens d'offres (inchangée) ----------
 def extraire_offres(page):
-    """Renvoie {adresse: titre} pour les liens dont l'adresse ressemble à une offre."""
+    """Renvoie {adresse: titre} pour les liens dont l'adresse ressemble à une offre :
+    un mot comme job, offre, emploi… dans l'adresse, OU une sous-page de la page surveillée
+    (ex. cloud-temple.com/en/join-us/ingenieur-cloud… sous cloud-temple.com/en/join-us)."""
     page_url = page.url.split("#")[0].rstrip("/")
+    base = urlparse(page_url)
     liens = page.eval_on_selector_all(
         "a", "els => els.map(e => [e.innerText.trim(), e.href])")
     offres = {}
@@ -45,7 +43,10 @@ def extraire_offres(page):
         href = href.split("#")[0]
         if not href.startswith("http") or href.rstrip("/") == page_url:
             continue
-        if MOTIF.search(href):
+        lien = urlparse(href)
+        sous_page = (lien.netloc.removeprefix("www.") == base.netloc.removeprefix("www.") and len(base.path.strip("/")) > 0
+                     and lien.path.rstrip("/").startswith(base.path.rstrip("/") + "/"))
+        if MOTIF.search(href) or sous_page:
             texte = " ".join(texte.split())
             if len(texte) > len(offres.get(href, "")):
                 offres[href] = texte
