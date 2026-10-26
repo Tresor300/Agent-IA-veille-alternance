@@ -6,6 +6,7 @@ import sqlite3
 from datetime import datetime
 import time
 from config import envoyer, noter_passage, DATA, RAPIDE
+from connecteurs import detecter_acces, adresse_a_visiter, lire_interface, autorise, AccesImpossible
 from dedoublon import Registre, offres_deja_envoyees
 from filtre_ia import juger, juger_offres, GeminiIndisponible, TAILLE_PAQUET, TAILLE_PAQUET_OFFRES
 from playwright.sync_api import sync_playwright
@@ -21,12 +22,17 @@ MOTIF = re.compile(r"job|offre|offer|emploi|poste|position|vacanc|annonce|requis
 ALTERNANCE = re.compile(r"altern|apprenti|apprentissage|contrat pro|work[- ]?study|apprenticeship", re.I)
 AUTRE_CONTRAT = re.compile(r"\b(stage|stagiaire|intern|internship|cdi|cdd|graduate program)\b", re.I)
 # Lien vers la rubrique « Alternance » d'un site (ex. « Alternance (4) », « Nos stages et alternances »)
-RUBRIQUE = re.compile(r"(nos\s+)?(offres?\s+(en|d'|de)\s*)?(stages?\s+(et|&)\s+)?(alternances?|apprentissage)\b", re.I)
-METIER = re.compile(r"[hfm]/[hfmwx]|\s[-–]\s|ingénieu|développ|technicien|chargé|assistant|analyste|engineer|developer", re.I)
+# Lien vers la rubrique « Alternance » d'un site : le texte du lien ne contient QUE le nom de la rubrique,
+# éventuellement suivi d'un nombre d'offres (« Alternance (4) », « Alternance et apprentissage (2) »).
+# « Alternance DevOps » est une offre, pas une rubrique.
+RUBRIQUE = re.compile(r"(nos\s+)?(offres?\s+(en|d'|de)\s*)?((stages?|alternances?|apprentissage)\s*(et|&|/)\s*)?"
+                      r"(alternances?|apprentissage|stages?)\s*(\(\d+\))?", re.I)
+DEBUT_RUBRIQUE = re.compile(r"nos\s+(stages?\s+et\s+alternances?|alternances?|offres?\s+(en|d')\s*alternance)\b", re.I)
 
 
 def est_rubrique(texte):
-    return len(texte) <= 80 and RUBRIQUE.match(texte) and not METIER.search(texte)
+    texte = " ".join((texte or "").split())
+    return bool(RUBRIQUE.fullmatch(texte) and ALTERNANCE.search(texte)) or bool(DEBUT_RUBRIQUE.match(texte))
 
 
 # ---------- 1. Collecte des liens d'offres (inchangée) ----------
@@ -105,6 +111,9 @@ if RAPIDE:                                     # test rapide : 10 sites seulemen
 
 def visiter(navigateur, url, essais=2):
     """Renvoie (offres, erreur). Ne plante jamais : en cas d'échec, offres est vide."""
+    url = adresse_a_visiter(url)                 # Workday : page filtrée sur « alternance »
+    if not autorise(url):
+        return {}, "lecture interdite par le robots.txt du site"
     erreur = None
     for essai in range(essais):
         page = navigateur.new_page(user_agent=UA)
@@ -118,7 +127,7 @@ def visiter(navigateur, url, essais=2):
                 raise Exception("page introuvable")
             offres = extraire_offres(page)
             # Suivre la rubrique « Alternance » du site : ses offres n'apparaissent pas sur la page principale
-            for rubrique in [u for u, t in offres.items() if est_rubrique(t)][:3]:
+            for rubrique in [u for u, t in offres.items() if est_rubrique(t) and autorise(u)][:3]:
                 try:
                     page.goto(rubrique, wait_until="domcontentloaded", timeout=30000)
                     page.wait_for_timeout(5000)
@@ -139,6 +148,8 @@ def visiter(navigateur, url, essais=2):
 def lire_offre(navigateur, url):
     """Texte de la page d'une offre (zone principale si elle existe), 3000 caractères au plus.
     Renvoie "" si la page ne s'ouvre pas : l'IA jugera alors sur le titre."""
+    if not autorise(url):
+        return ""
     page = navigateur.new_page(user_agent=UA)
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
@@ -193,14 +204,30 @@ with sync_playwright() as p:
 
     # 4.1 Collecte : visite des pages carrière
     for i, (entreprise, url) in enumerate(SITES, 1):
-        offres, erreur = visiter(navigateur, url)
+        acces, identifiant = detecter_acces(url)
+        descriptions = {}
+        if acces == "page":
+            offres, erreur = visiter(navigateur, url)
+        else:                                    # interface officielle de la plateforme
+            try:
+                lues = lire_interface(acces, identifiant)
+                offres = {u: t for u, (t, _) in lues.items()}
+                descriptions = {u: d for u, (_, d) in lues.items()}
+                erreur = None
+            except AccesImpossible as e:
+                offres, erreur = {}, f"{acces} : {e}"
         if erreur:
             print(f"[{i}/{len(SITES)}] ⚠️  {entreprise} : {erreur}")
             bilan["erreur"].append(entreprise)
             continue
         nouvelles, premiere_visite = garder_nouvelles(connexion, offres, entreprise)
         total_nouvelles += len(nouvelles)
-        print(f"[{i}/{len(SITES)}] {entreprise} : {len(offres)} offres, dont {len(nouvelles)} nouvelles")
+        if descriptions:                         # description fournie par l'interface : pas besoin d'ouvrir l'offre
+            connexion.executemany("UPDATE offres SET description = ? WHERE url = ?",
+                                  [(descriptions[u], u) for u in nouvelles if u in descriptions])
+            connexion.commit()
+        source = "" if acces == "page" else f" [{acces}]"
+        print(f"[{i}/{len(SITES)}] {entreprise}{source} : {len(offres)} offres, dont {len(nouvelles)} nouvelles")
         if premiere_visite:
             print("    (base vide : offres mémorisées, pas d'alerte)")
         if offres:
