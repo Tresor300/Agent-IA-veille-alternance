@@ -128,6 +128,17 @@ def visiter(navigateur, url, essais=2):
             if "introuvable" in titre or "not found" in titre:
                 raise Exception("page introuvable")
             offres = extraire_offres(page)
+            # Pages suivantes (Workday affiche 20 offres par page) : bouton « suivant », 10 pages au plus
+            for _ in range(10):
+                suivant = page.query_selector("button[aria-label='next'], button[data-uxi-element-id='next']")
+                if not suivant or not suivant.is_enabled():
+                    break
+                suivant.click()
+                page.wait_for_timeout(3000)
+                nouvelles_offres = {u: t for u, t in extraire_offres(page).items() if u not in offres}
+                if not nouvelles_offres:
+                    break
+                offres.update(nouvelles_offres)
             # Suivre la rubrique « Alternance » du site : ses offres n'apparaissent pas sur la page principale
             for rubrique in [u for u, t in offres.items() if est_rubrique(t) and autorise(u)][:3]:
                 try:
