@@ -1,5 +1,6 @@
 import os
 import re
+from urllib.parse import urlparse
 import pandas as pd
 import sqlite3
 from datetime import datetime
@@ -11,12 +12,6 @@ from playwright.sync_api import sync_playwright
 
 BASE = f"{DATA}/veilleur.db"
 
-# Mode test (MODE_TEST=1) : les messages sont affichés à l'écran au lieu d'être envoyés sur Telegram
-if os.environ.get("MODE_TEST"):
-    def envoyer(texte):
-        print("\n----- [MODE TEST] message non envoyé -----\n" + texte)
-        return True
-    print("🧪 MODE TEST : aucun message ne sera envoyé sur Telegram.")
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -36,8 +31,11 @@ def est_rubrique(texte):
 
 # ---------- 1. Collecte des liens d'offres (inchangée) ----------
 def extraire_offres(page):
-    """Renvoie {adresse: titre} pour les liens dont l'adresse ressemble à une offre."""
+    """Renvoie {adresse: titre} pour les liens dont l'adresse ressemble à une offre :
+    un mot comme job, offre, emploi… dans l'adresse, OU une sous-page de la page surveillée
+    (ex. cloud-temple.com/en/join-us/ingenieur-cloud… sous cloud-temple.com/en/join-us)."""
     page_url = page.url.split("#")[0].rstrip("/")
+    base = urlparse(page_url)
     liens = page.eval_on_selector_all(
         "a", "els => els.map(e => [e.innerText.trim(), e.href])")
     offres = {}
@@ -45,7 +43,10 @@ def extraire_offres(page):
         href = href.split("#")[0]
         if not href.startswith("http") or href.rstrip("/") == page_url:
             continue
-        if MOTIF.search(href):
+        lien = urlparse(href)
+        sous_page = (lien.netloc.removeprefix("www.") == base.netloc.removeprefix("www.") and len(base.path.strip("/")) > 0
+                     and lien.path.rstrip("/").startswith(base.path.rstrip("/") + "/"))
+        if MOTIF.search(href) or sous_page:
             texte = " ".join(texte.split())
             if len(texte) > len(offres.get(href, "")):
                 offres[href] = texte
@@ -69,10 +70,12 @@ def ouvrir_base():
 
 def garder_nouvelles(connexion, offres, entreprise):
     """Enregistre les offres jamais vues. Renvoie (nouvelles, première_visite).
-    À la première visite d'une entreprise, les offres sont mémorisées sans être jugées ni envoyées."""
+    Première visite d'une entreprise ajoutée à la liste : ses offres actuelles sont jugées et envoyées
+    comme les autres (le filtre IA ne laisse passer que les alternances en informatique).
+    Seule exception : base vide (mémoire perdue) → tout est mémorisé sans jugement ni envoi."""
     deja = connexion.execute(
         "SELECT COUNT(*) FROM offres WHERE entreprise = ?", (entreprise,)).fetchone()[0]
-    premiere_visite = deja == 0
+    premiere_visite = deja == 0 and BASE_VIDE
     nouvelles = {}
     for url, titre in offres.items():
         if not connexion.execute("SELECT 1 FROM offres WHERE url = ?", (url,)).fetchone():
@@ -84,6 +87,13 @@ def garder_nouvelles(connexion, offres, entreprise):
     connexion.commit()
     return nouvelles, premiere_visite
 
+
+# Mémoire perdue ? (aucune offre en base au démarrage)
+with sqlite3.connect(BASE) as _c:
+    try:
+        BASE_VIDE = _c.execute("SELECT COUNT(*) FROM offres").fetchone()[0] == 0
+    except sqlite3.OperationalError:
+        BASE_VIDE = True
 
 # Sites à surveiller : pages validées (✅ Fiable et 🔧 Corrigée)
 df = pd.read_excel(f"{DATA}/pages_a_surveiller.xlsx")
@@ -192,7 +202,7 @@ with sync_playwright() as p:
         total_nouvelles += len(nouvelles)
         print(f"[{i}/{len(SITES)}] {entreprise} : {len(offres)} offres, dont {len(nouvelles)} nouvelles")
         if premiere_visite:
-            print("    (première visite : offres mémorisées, pas d'alerte)")
+            print("    (base vide : offres mémorisées, pas d'alerte)")
         if offres:
             bilan["avec offres"] += 1
         else:
