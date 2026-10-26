@@ -20,8 +20,10 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 MOTIF = re.compile(r"job|offre|offer|emploi|poste|position|vacanc|annonce|requisition|\d{4,}", re.I)
 # Mots d'alternance, et contrats incompatibles annoncés dans le titre (règle fixe, sans IA)
 ALTERNANCE = re.compile(r"altern|apprenti|apprentissage|contrat pro|work[- ]?study|apprenticeship", re.I)
+# Pages de vérification anti-robot affichées à la place de l'offre
+ANTI_ROBOT = re.compile(r"cloudflare|just a moment|checking your browser|v[ée]rification de s[ée]curit[ée]|"
+                        r"attention required|enable javascript and cookies|captcha", re.I)
 AUTRE_CONTRAT = re.compile(r"\b(stage|stagiaire|intern|internship|cdi|cdd|graduate program)\b", re.I)
-# Lien vers la rubrique « Alternance » d'un site (ex. « Alternance (4) », « Nos stages et alternances »)
 # Lien vers la rubrique « Alternance » d'un site : le texte du lien ne contient QUE le nom de la rubrique,
 # éventuellement suivi d'un nombre d'offres (« Alternance (4) », « Alternance et apprentissage (2) »).
 # « Alternance DevOps » est une offre, pas une rubrique.
@@ -162,6 +164,8 @@ def lire_offre(navigateur, url):
                 if len(texte) > 200:
                     break
         texte = texte[:3000]
+        if ANTI_ROBOT.search(texte[:600]):         # page de vérification (Cloudflare…) : rien à lire
+            return ""
         # Mention d'alternance ailleurs dans la page (encadré, bas de page) : on transmet la phrase
         # elle-même, pour que l'IA distingue « Type de contrat : apprentissage » d'un slogan du site
         if not ALTERNANCE.search(texte):
@@ -240,7 +244,8 @@ with sync_playwright() as p:
     a_juger = connexion.execute(
         "SELECT url, titre FROM offres WHERE envoyee = 0 AND verdict IS NULL").fetchall()
     print(f"\nÉtape 1 : {len(a_juger)} titres à juger…")
-    vides = [(u,) for u, t in a_juger if len((t or "").strip()) < 3]          # liens sans texte
+    vides = [(u,) for u, t in a_juger                                       # liens sans texte ou « 375 »
+             if not re.search(r"[^\W\d_]{3}", t or "")]                      # (pagination) : pas 3 lettres
     connexion.executemany("UPDATE offres SET verdict = 'non', raison = 'lien sans texte' WHERE url = ?", vides)
     contrat = [(u,) for u, t in a_juger if AUTRE_CONTRAT.search(t or "") and not ALTERNANCE.search(t or "")]
     connexion.executemany("UPDATE offres SET verdict = 'non', raison = 'stage, CDI ou CDD annoncé dans le titre' "
@@ -276,10 +281,12 @@ with sync_playwright() as p:
                 paquet.append((u, t, e, desc))
             connexion.commit()
             verdicts = juger_offres([(t, e, desc) for _, t, e, desc in paquet], source="carriere")
-            # Règle fixe : une offre lisible qui ne parle jamais d'alternance n'en est pas une
-            verdicts = [("non", "aucune mention d'alternance dans l'offre")
-                        if v in ("oui", "à vérifier") and len(desc or "") > 800
-                        and not ALTERNANCE.search((t or "") + " " + desc) else (v, r)
+            # Règle fixe : sur un site carrière, une alternance le dit. Si ni le titre ni l'offre
+            # (y compris un encadré ailleurs sur la page) n'en parlent, ce n'en est pas une.
+            # Une page illisible (anti-robot) ne suffit pas à rendre une offre « à vérifier ».
+            verdicts = [("non", "aucune mention d'alternance (ni dans le titre ni dans l'offre)")
+                        if v in ("oui", "à vérifier")
+                        and not ALTERNANCE.search((t or "") + " " + (desc or "")) else (v, r)
                         for (_, t, _, desc), (v, r) in zip(paquet, verdicts)]
             connexion.executemany("UPDATE offres SET verdict2 = ?, raison2 = ? WHERE url = ?",
                                   [(v, r, u) for (u, *_), (v, r) in zip(paquet, verdicts) if v])
