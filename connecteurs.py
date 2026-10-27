@@ -37,11 +37,12 @@ def detecter_acces(url):
 
 
 def adresse_a_visiter(url):
-    """Workday : la page publique est filtrée sur « alternance » grâce à la recherche du site."""
+    """Workday : si l'adresse n'a aucun filtre, on ajoute la recherche « alternance ».
+    Si elle a déjà des filtres (pays, type de contrat), on la garde telle quelle : ajouter une
+    recherche par mot-clé exclurait des offres titrées « Apprenti » ou « Apprenticeship »."""
     u = urlparse(url)
-    if "myworkdayjobs.com" in u.netloc and "q=" not in u.query:
-        parametres = parse_qsl(u.query) + [("q", "alternance")]
-        return urlunparse(u._replace(query=urlencode(parametres)))
+    if ("myworkdayjobs.com" in u.netloc or "myworkdaysite.com" in u.netloc) and not u.query:
+        return urlunparse(u._replace(query=urlencode([("q", "alternance")])))
     return url
 
 
