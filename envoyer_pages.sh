@@ -3,7 +3,7 @@
 # Usage (depuis n'importe quel dossier) :   ~/Agent-IA-veille-alternance/envoyer_pages.sh
 set -e
 DEPOT=~/Agent-IA-veille-alternance-data
-TELECHARGEMENTS=$(ls -d /mnt/c/Users/*/Downloads 2>/dev/null | head -1)
+TELECHARGEMENTS=/mnt/c/Users/PC/Downloads
 
 # 1. Pas pendant un passage : ils démarrent aux heures paires à h+17 et durent environ 50 min
 heure=$((10#$(date +%H))); minute=$((10#$(date +%M)))
