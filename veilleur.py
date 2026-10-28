@@ -17,7 +17,8 @@ BASE = f"{DATA}/veilleur.db"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 # Une offre se reconnaît à son adresse : job, offre, emploi... ou un numéro d'identifiant
-MOTIF = re.compile(r"job|offre|offer|emploi|poste|position|vacanc|annonce|requisition|\d{4,}", re.I)
+MOTIF = re.compile(r"job|offre|offer|emploi|poste|position|vacanc|annonce|requisition|\d{4,}"
+                   r"|taleez\.com/apply/(?!sp/)|breezy\.hr/p/", re.I)   # plateformes Taleez et Breezy
 # Mots d'alternance, et contrats incompatibles annoncés dans le titre (règle fixe, sans IA)
 ALTERNANCE = re.compile(r"altern|apprenti|apprentissage|contrat pro|work[- ]?study|apprenticeship", re.I)
 # Pages de vérification anti-robot affichées à la place de l'offre
